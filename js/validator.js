@@ -120,7 +120,7 @@
     var prevErrors = $el.data('bs.validator.errors')
     var errors
 
-    if (prevValue === value) return $.Deferred().resolve()
+    if (prevValue === value && !$(this).data('bs.validator.submit.pending')) return $.Deferred().resolve()
     else $el.data('bs.validator.previous', value)
 
     if ($el.is('[type="radio"]')) $el = this.$element.find('input[name="' + $el.attr('name') + '"]')
@@ -156,6 +156,7 @@
   Validator.prototype.runValidators = function ($el) {
     var errors   = []
     var deferred = $.Deferred()
+    var validatorPromises = [];
     var options  = this.options
 
     $el.data('bs.validator.deferred') && $el.data('bs.validator.deferred').reject()
@@ -170,29 +171,63 @@
 
     $.each(Validator.VALIDATORS, $.proxy(function (key, validator) {
       if ((getValue($el) || $el.attr('required')) &&
-          ($el.data(key) || key == 'native') &&
-          !validator.call(this, $el)) {
-        var error = getErrorMessage(key)
-        !~errors.indexOf(error) && errors.push(error)
+          ($el.data(key) || key == 'native')) {
+
+        var error;
+
+        if ($el.data('validator-onsubmit') && !$(this).data('bs.validator.submit.pending')) {
+          return;
+        }
+
+        var validatorResult = validator.call(this, $el);
+
+        if (!validatorResult) {
+          error = getErrorMessage(key);
+          !~errors.indexOf(error) && errors.push(error);
+        }
+        // check if validator is a promise
+        else if (typeof validatorResult === 'object' && typeof validatorResult.then === 'function') {
+          var validatorPromise = validatorResult;
+          // check if it's really a promise
+
+          validatorPromises.push(validatorPromise);
+          validatorPromise.fail(function() {
+            error = getErrorMessage(key);
+            !~errors.indexOf(error) && errors.push(error);
+          }).always(function() {
+
+          });
+        }
       }
     }, this))
 
     if (!errors.length && getValue($el) && $el.data('remote')) {
+
+      var remoteDeferredValidator = $.Deferred();
+      validatorPromises.push(remoteDeferredValidator.promise());
+
       this.defer($el, function () {
         var data = {}
         data[$el.attr('name')] = getValue($el)
         $.get($el.data('remote'), data)
           .fail(function (jqXHR, textStatus, error) { errors.push(getErrorMessage('remote') || error) })
-          .always(function () { deferred.resolve(errors)})
-      })
-    } else deferred.resolve(errors)
+          .always(function () { remoteDeferredValidator.resolve()})
+      });
+
+    }
+
+    $.when.apply(this, validatorPromises).always(function() {
+      setTimeout(function(){
+        deferred.resolve(errors);
+      }, 10)
+      
+    });
 
     return deferred.promise()
   }
 
   Validator.prototype.validate = function () {
     var self = this
-
     $.when(this.$inputs.map(function (el) {
       return self.validateInput($(this), false)
     })).then(function () {
@@ -268,8 +303,12 @@
   }
 
   Validator.prototype.onSubmit = function (e) {
+    $(this).data('bs.validator.submit.pending', true)
     this.validate()
-    if (this.isIncomplete() || this.hasErrors()) e.preventDefault()
+    if (this.isIncomplete() || this.hasErrors()) {
+      e.preventDefault()
+    }
+    $(this).data('bs.validator.submit.pending', false)
   }
 
   Validator.prototype.toggleSubmit = function () {
@@ -279,8 +318,13 @@
 
   Validator.prototype.defer = function ($el, callback) {
     callback = $.proxy(callback, this, $el)
-    if (!this.options.delay) return callback()
-    window.clearTimeout($el.data('bs.validator.timeout'))
+
+    if (!this.options.delay) {
+      return callback();
+    }
+
+    window.clearTimeout($el.data('bs.validator.timeout'));
+
     $el.data('bs.validator.timeout', window.setTimeout(callback, this.options.delay))
   }
 
